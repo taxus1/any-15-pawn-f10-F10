@@ -37,6 +37,12 @@ public class PawnRenew extends BaseEntity {
     /** 续的是哪张当票（t_pawn_ticket.id）。 */
     private Long ticketId;
 
+    /**
+     * 当票归属当户（t_pawner.id），办理当下从票面定格抄入，仅供冻结门禁等办理期校验使用。
+     * t_pawn_renew 表没有这一列，不持久化（续当归属随时可由当票反查）。
+     */
+    private transient Long pawnerId;
+
     /** 续当前到期日期：办理当下从票面上定格抄录。 */
     private LocalDate oldDueDate;
 
@@ -82,6 +88,7 @@ public class PawnRenew extends BaseEntity {
 
         PawnRenew renew = new PawnRenew();
         renew.ticketId = ticket.getId();
+        renew.pawnerId = ticket.getPawnerId();
         renew.oldDueDate = oldDue;
         renew.extendMonths = termMonths;
         renew.newDueDate = oldDue.plusMonths(termMonths);

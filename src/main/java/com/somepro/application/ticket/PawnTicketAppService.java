@@ -2,6 +2,8 @@ package com.somepro.application.ticket;
 
 import com.somepro.common.exception.BizException;
 import com.somepro.domain.collateral.model.Category;
+import com.somepro.domain.pawner.model.PawnerStatus;
+import com.somepro.domain.pawner.repository.PawnerStatePort;
 import com.somepro.domain.shared.model.PageResult;
 import com.somepro.domain.ticket.model.PawnTicket;
 import com.somepro.domain.ticket.model.PawnTicketQuery;
@@ -35,19 +37,25 @@ public class PawnTicketAppService {
     private final PawnTicketRepository pawnTicketRepository;
     private final TicketCollateralPort ticketCollateralPort;
     private final RateConfigPort rateConfigPort;
+    private final PawnerStatePort pawnerStatePort;
 
     public PawnTicketAppService(PawnTicketRepository pawnTicketRepository,
                                 TicketCollateralPort ticketCollateralPort,
-                                RateConfigPort rateConfigPort) {
+                                RateConfigPort rateConfigPort,
+                                PawnerStatePort pawnerStatePort) {
         this.pawnTicketRepository = pawnTicketRepository;
         this.ticketCollateralPort = ticketCollateralPort;
         this.rateConfigPort = rateConfigPort;
+        this.pawnerStatePort = pawnerStatePort;
     }
 
     /**
      * 开票：当户/类别/估值随当物快照带出，利率费率照该类别当前配置抄快照，
      * 当金受折当率上限约束，到期日期按起当日期 + 当期月数推算，新票落在当。
      * 起当日期不传按当天（行里时区）算；票号由仓储按 DP-年份-序号 生成。
+     *
+     * 冻结门禁：当户冻住（FROZEN）后名下不许开新票，办理前先挡一道；与冻结并发的缝由仓储
+     * 写锁事务内的当户行锁终检兜住。注销（CLOSED）档案开不了票（物/票早随注销前结清），同样挡回。
      */
     public Mono<PawnTicket> issue(Long collateralId, String pawnAmount, String startDate, Integer termMonths) {
         if (collateralId == null) {
@@ -58,11 +66,24 @@ public class PawnTicketAppService {
 
         return ticketCollateralPort.findSnapshot(collateralId)
                 .switchIfEmpty(Mono.error(new BizException("当物不存在，不能就查无此物的东西开票")))
-                .flatMap(collateral -> rateConfigPort.findEnabled(collateral.category())
+                .flatMap(collateral -> pawnerStatePort.findStatus(collateral.pawnerId())
+                        .switchIfEmpty(Mono.error(new BizException("当物归属的当户档案不存在，不能开票")))
+                        .doOnNext(this::requireNotFrozen)
+                        .then(rateConfigPort.findEnabled(collateral.category()))
                         .switchIfEmpty(Mono.error(new BizException("该当物所属类别（"
                                 + collateral.category().label() + "）没有生效的费率配置，不能开票")))
                         .flatMap(rate -> pawnTicketRepository.insert(
                                 PawnTicket.issue(collateral, amount, rate, start, termMonths))));
+    }
+
+    /** 冻结户名下不能开新票 / 不能续当；注销档案同样不再受理新业务。 */
+    private void requireNotFrozen(PawnerStatus status) {
+        if (status == PawnerStatus.FROZEN) {
+            throw new BizException("该当户已冻结，不能开新当票；请先解冻再办理");
+        }
+        if (status == PawnerStatus.CLOSED) {
+            throw new BizException("该当户已注销，不能开新当票");
+        }
     }
 
     /**

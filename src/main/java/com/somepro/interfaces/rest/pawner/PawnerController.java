@@ -18,7 +18,7 @@ import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
 
 /**
- * 当户模块用户接口层：录入、修改、详情、注销、按条件翻名单。
+ * 当户模块用户接口层：录入、修改、详情、注销、冻结、解冻、按条件翻名单。
  *
  * 只做协议适配（参数解析、VO 转换、Result 包装），业务编排在 {@link PawnerAppService}。
  * 入参统一用 @RequestParam：表单 / query string / x-www-form-urlencoded 都能接，便于柜台端直接调用。
@@ -42,11 +42,27 @@ public class PawnerController {
                 .map(Result::ok);
     }
 
-    /** 修改档案：字段都传全量；status 只用于在 NORMAL/FROZEN 间冻结解冻，注销走 /close，不传则不改状态。 */
+    /** 修改档案：只改姓名/身份证/电话/地址；冻结解冻走 /freeze、/unfreeze，注销走 /close。 */
     @PostMapping("/update")
     public Mono<Result<PawnerVO>> update(@ModelAttribute PawnerUpdateRequest request) {
         return pawnerAppService.update(request.getId(), request.getName(), request.getIdCard(),
-                        request.getPhone(), request.getAddress(), request.getStatus())
+                        request.getPhone(), request.getAddress())
+                .map(PawnerVoConverter::toVo)
+                .map(Result::ok);
+    }
+
+    /** 冻结：正常 → FROZEN，办理时刻与经办人落审计列；重复点只算头一回，已注销的挡回并说明。 */
+    @PostMapping("/freeze")
+    public Mono<Result<PawnerVO>> freeze(@ModelAttribute PawnerIdRequest request) {
+        return pawnerAppService.freeze(request.getId())
+                .map(PawnerVoConverter::toVo)
+                .map(Result::ok);
+    }
+
+    /** 解冻：FROZEN → 正常；重复点只算头一回，已注销的不能解、单独说明情况。 */
+    @PostMapping("/unfreeze")
+    public Mono<Result<PawnerVO>> unfreeze(@ModelAttribute PawnerIdRequest request) {
+        return pawnerAppService.unfreeze(request.getId())
                 .map(PawnerVoConverter::toVo)
                 .map(Result::ok);
     }

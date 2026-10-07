@@ -5,12 +5,14 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.github.pagehelper.PageHelper;
 import com.somepro.common.exception.BizException;
+import com.somepro.domain.pawner.model.PawnerStatus;
 import com.somepro.domain.renew.model.PawnRenew;
 import com.somepro.domain.shared.model.PageResult;
 import com.somepro.domain.renew.repository.PawnRenewRepository;
 import com.somepro.domain.ticket.model.TicketStatus;
 import com.somepro.infrastructure.config.ReactiveOperatorContext;
 import com.somepro.infrastructure.persistence.audit.AuditContextHolder;
+import com.somepro.infrastructure.persistence.pawner.PawnerMapper;
 import com.somepro.infrastructure.persistence.renew.converter.PawnRenewPoConverter;
 import com.somepro.infrastructure.persistence.renew.po.PawnRenewPO;
 import com.somepro.infrastructure.persistence.ticket.po.PawnTicketPO;
@@ -71,15 +73,18 @@ public class PawnRenewRepositoryImpl implements PawnRenewRepository {
 
     private final PawnRenewMapper pawnRenewMapper;
     private final PawnTicketMapper pawnTicketMapper;
+    private final PawnerMapper pawnerMapper;
     private final TransactionTemplate transactionTemplate;
     private final DataSource dataSource;
 
     public PawnRenewRepositoryImpl(PawnRenewMapper pawnRenewMapper,
                                    PawnTicketMapper pawnTicketMapper,
+                                   PawnerMapper pawnerMapper,
                                    PlatformTransactionManager transactionManager,
                                    DataSource dataSource) {
         this.pawnRenewMapper = pawnRenewMapper;
         this.pawnTicketMapper = pawnTicketMapper;
+        this.pawnerMapper = pawnerMapper;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.dataSource = dataSource;
     }
@@ -91,6 +96,18 @@ public class PawnRenewRepositoryImpl implements PawnRenewRepository {
             for (int attempt = 0; attempt < MAX_RETRY; attempt++) {
                 try {
                     return inWriteLock(() -> transactionTemplate.execute(status -> {
+                        // 冻结门禁终检：行锁锁定读当户，与冻结/解冻抢同一行锁串行，
+                        // 冻住的户在此被挡回，杜绝「预检过、推进票期前一刻被冻」的缝。
+                        String pawnerStatus = pawnerMapper.selectStatusForUpdate(renew.getPawnerId());
+                        if (pawnerStatus == null) {
+                            throw new BizException("当票归属的当户档案不存在，不能续当");
+                        }
+                        if (PawnerStatus.valueOf(pawnerStatus) == PawnerStatus.FROZEN) {
+                            throw new BizException("该当户已冻结，名下当票不能续当；请先解冻再办理");
+                        }
+                        if (PawnerStatus.valueOf(pawnerStatus) == PawnerStatus.CLOSED) {
+                            throw new BizException("该当户已注销，不能续当");
+                        }
                         // 同票同时点只续一条：条件更新「在当 + 到期日期仍是办理前那一天」才推进。
                         // 重复递交的第二笔到期日期已对不上 oldDueDate，更新 0 行，整段回滚不落记录。
                         PawnTicketPO ticketUpdate = new PawnTicketPO();

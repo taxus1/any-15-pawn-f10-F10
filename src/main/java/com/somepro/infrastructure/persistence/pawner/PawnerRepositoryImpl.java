@@ -154,6 +154,60 @@ public class PawnerRepositoryImpl implements PawnerRepository {
     }
 
     @Override
+    public Mono<Pawner> freeze(Long id) {
+        return blocking(() -> changeStatusCas(id, PawnerStatus.NORMAL, PawnerStatus.FROZEN));
+    }
+
+    @Override
+    public Mono<Pawner> unfreeze(Long id) {
+        return blocking(() -> changeStatusCas(id, PawnerStatus.FROZEN, PawnerStatus.NORMAL));
+    }
+
+    /**
+     * 冻结/解冻的落库核心：一条行级条件更新（CAS）完成状态翻转。
+     *
+     * 并发正确性全在这条条件 SQL 上 —— WHERE id=? AND status=期望旧值，InnoDB 行锁让并发的
+     * 冻结与解冻在同一行上串行，谁后提交谁落定，库里永远是一个确定状态；
+     * 不会出现「后一笔拿旧快照整行覆盖，把状态又翻回去」的乱账（对比普通 updateById 全字段覆盖）。
+     *
+     * 命中 1 行：状态真的翻了，审计字段 update_time/update_by 由 MetaObjectHandler 自动填成
+     *           本次办理时刻与经办人（经办人居于 Reactor Context，不手填）。
+     * 命中 0 行分三种，重读当前状态对号处理：
+     *   - 已是目标状态：重复点击（幂等），不再落库，头一次的办理时刻/经办人原样保留；
+     *   - 当前是 CLOSED：注销终态，业务上不允许，抛带说明的业务异常（注销的不能解/冻）；
+     *   - 查无此行：当户不存在。
+     */
+    private Pawner changeStatusCas(Long id, PawnerStatus expect, PawnerStatus target) {
+        return transactionTemplate.execute(status -> {
+            PawnerPO update = new PawnerPO();
+            update.setStatus(target.code());
+            int rows = pawnerMapper.update(update, Wrappers.<PawnerPO>lambdaUpdate()
+                    .eq(PawnerPO::getId, id)
+                    .eq(PawnerPO::getStatus, expect.code()));
+            PawnerPO current = pawnerMapper.selectById(id);
+            if (rows > 0) {
+                return PawnerPoConverter.toDomain(Objects.requireNonNull(current, "当户不存在"));
+            }
+            // 没翻成：按最新状态把情况说清楚
+            if (current == null) {
+                throw new BizException("当户不存在");
+            }
+            PawnerStatus currentStatus = PawnerStatus.valueOf(current.getStatus());
+            if (currentStatus == target) {
+                // 本来就是目标状态：重复点击，幂等返回，不再改写办理时刻/经办人
+                return PawnerPoConverter.toDomain(current);
+            }
+            if (currentStatus == PawnerStatus.CLOSED) {
+                throw new BizException(target == PawnerStatus.FROZEN
+                        ? "当户已注销，不能冻结；注销是终态，如属误操作请按档案更正流程单独处理"
+                        : "当户已注销，不能解冻；注销与冻结不是一回事，如属误注销请按档案更正流程单独处理");
+            }
+            // 并发下状态刚被对方操作翻走（如解冻撞上刚冻结）：条件更新已保证不覆盖，提示按最新状态办理即可
+            throw new BizException("当户状态已变化，本次操作未生效；请刷新后按最新状态办理");
+        });
+    }
+
+    @Override
     public Mono<PageResult<Pawner>> page(int pageNum, int pageSize, PawnerQuery query) {
         return this.<PageResult<Pawner>>blocking(() -> {
             try {

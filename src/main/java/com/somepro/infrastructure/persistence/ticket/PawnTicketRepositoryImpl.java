@@ -7,6 +7,7 @@ import com.github.pagehelper.PageHelper;
 import com.somepro.common.exception.BizException;
 import com.somepro.domain.collateral.model.Category;
 import com.somepro.domain.collateral.model.CollateralStatus;
+import com.somepro.domain.pawner.model.PawnerStatus;
 import com.somepro.domain.shared.model.PageResult;
 import com.somepro.domain.ticket.model.PawnTicket;
 import com.somepro.domain.ticket.model.PawnTicketQuery;
@@ -14,6 +15,7 @@ import com.somepro.domain.ticket.model.TicketStatus;
 import com.somepro.domain.ticket.repository.PawnTicketRepository;
 import com.somepro.infrastructure.config.ReactiveOperatorContext;
 import com.somepro.infrastructure.persistence.audit.AuditContextHolder;
+import com.somepro.infrastructure.persistence.pawner.PawnerMapper;
 import com.somepro.infrastructure.persistence.ticket.converter.PawnTicketPoConverter;
 import com.somepro.infrastructure.persistence.ticket.po.PawnTicketPO;
 import com.somepro.infrastructure.persistence.ticket.po.TicketCollateralPO;
@@ -72,15 +74,18 @@ public class PawnTicketRepositoryImpl implements PawnTicketRepository {
 
     private final PawnTicketMapper pawnTicketMapper;
     private final TicketCollateralMapper ticketCollateralMapper;
+    private final PawnerMapper pawnerMapper;
     private final TransactionTemplate transactionTemplate;
     private final DataSource dataSource;
 
     public PawnTicketRepositoryImpl(PawnTicketMapper pawnTicketMapper,
                                     TicketCollateralMapper ticketCollateralMapper,
+                                    PawnerMapper pawnerMapper,
                                     PlatformTransactionManager transactionManager,
                                     DataSource dataSource) {
         this.pawnTicketMapper = pawnTicketMapper;
         this.ticketCollateralMapper = ticketCollateralMapper;
+        this.pawnerMapper = pawnerMapper;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
         this.dataSource = dataSource;
     }
@@ -92,6 +97,9 @@ public class PawnTicketRepositoryImpl implements PawnTicketRepository {
             for (int attempt = 0; attempt < MAX_RETRY; attempt++) {
                 try {
                     return inWriteLock(() -> transactionTemplate.execute(status -> {
+                        // 冻结门禁终检：事务内先对当户行加锁（FOR UPDATE），与冻结/解冻的条件更新抢同一行锁，
+                        // 串行化后要么看到已冻结并挡回、要么先于冻结提交开票成功，杜绝「预检过、落库前被冻」的缝。
+                        requirePawnerNotFrozen(ticket.getPawnerId());
                         // 一物一票：锁内点在当票，同一件东西前后脚来两张也只落得了一张
                         if (pawnTicketMapper.countActiveByCollateral(ticket.getCollateralId()) > 0) {
                             throw new BizException("该当物已有一张在当的当票，一票未结不能再开；请先结清原票");
@@ -234,6 +242,25 @@ public class PawnTicketRepositoryImpl implements PawnTicketRepository {
             }
         }
         return prefix + String.format("%04d", maxSeq + 1);
+    }
+
+    /**
+     * 当户冻结门禁（开票写锁事务内调用）：行锁锁定读当户状态。
+     * FOR UPDATE 与冻结/解冻的 UPDATE 抢同一行锁，二者彻底串行；冻住的户开新票在此被挡回，
+     * 注销档案同样不受理新票。行锁随本事务提交释放，不存在「放了锁事务还没提交」的窗口。
+     */
+    private void requirePawnerNotFrozen(Long pawnerId) {
+        String current = pawnerMapper.selectStatusForUpdate(pawnerId);
+        if (current == null) {
+            throw new BizException("当物归属的当户档案不存在，不能开票");
+        }
+        PawnerStatus pawnerStatus = PawnerStatus.valueOf(current);
+        if (pawnerStatus == PawnerStatus.FROZEN) {
+            throw new BizException("该当户已冻结，不能开新当票；请先解冻再办理");
+        }
+        if (pawnerStatus == PawnerStatus.CLOSED) {
+            throw new BizException("该当户已注销，不能开新当票");
+        }
     }
 
     /**

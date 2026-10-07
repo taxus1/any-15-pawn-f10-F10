@@ -42,4 +42,13 @@ public interface PawnerMapper extends BaseMapper<PawnerPO> {
      */
     @Select("SELECT pawner_no FROM t_pawner WHERE pawner_no LIKE #{prefix} AND del_flag = 0")
     List<String> findPawnerNosByPrefix(@Param("prefix") String prefix);
+
+    /**
+     * 行锁锁定读当户状态：只给开票 / 续当的写库事务在落库前做冻结门禁用。
+     * 必须在事务里调用 —— FOR UPDATE 的行锁随事务提交才释放，与冻结/解冻的条件更新抢同一行锁，
+     * 从而把「预检通过、落库前一刻被冻」的并发缝彻底关上（普通预检走 BaseMapper 的 selectById 即可）。
+     * 查不到（档案不存在或已逻辑删除）返回 null，由调用方按自己的口径处理。
+     */
+    @Select("SELECT status FROM t_pawner WHERE id = #{id} AND del_flag = 0 FOR UPDATE")
+    String selectStatusForUpdate(@Param("id") Long id);
 }

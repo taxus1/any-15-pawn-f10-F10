@@ -1,9 +1,12 @@
 package com.somepro.application.renew;
 
 import com.somepro.common.exception.BizException;
+import com.somepro.domain.pawner.model.PawnerStatus;
+import com.somepro.domain.pawner.repository.PawnerStatePort;
 import com.somepro.domain.renew.model.PawnRenew;
 import com.somepro.domain.renew.repository.PawnRenewRepository;
 import com.somepro.domain.shared.model.PageResult;
+import com.somepro.domain.ticket.model.PawnTicket;
 import com.somepro.domain.ticket.repository.PawnTicketRepository;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
@@ -28,17 +31,23 @@ public class PawnRenewAppService {
 
     private final PawnRenewRepository pawnRenewRepository;
     private final PawnTicketRepository pawnTicketRepository;
+    private final PawnerStatePort pawnerStatePort;
 
     public PawnRenewAppService(PawnRenewRepository pawnRenewRepository,
-                               PawnTicketRepository pawnTicketRepository) {
+                               PawnTicketRepository pawnTicketRepository,
+                               PawnerStatePort pawnerStatePort) {
         this.pawnRenewRepository = pawnRenewRepository;
         this.pawnTicketRepository = pawnTicketRepository;
+        this.pawnerStatePort = pawnerStatePort;
     }
 
     /**
      * 办理续当：只认当票 id；顺延月数按票面原当期走，新到期日期从原到期日期往后推，
      * 票续完仍留在当。只有在当、且赶在到期日当天或之前的票办得了；
      * 同一时点重复递交只成一次（仓储写锁内条件更新兜底）。续当单号由仓储按 XD-年份-序号 生成。
+     *
+     * 冻结门禁：当户冻住期间名下的票也不能续，得先解冻；办理前预检，与冻结并发的缝由仓储
+     * 写锁事务内的当户行锁终检兜住。
      */
     public Mono<PawnRenew> renew(Long ticketId) {
         if (ticketId == null) {
@@ -48,7 +57,20 @@ public class PawnRenewAppService {
         LocalDateTime renewedAt = LocalDateTime.now(BIZ_ZONE);
         return pawnTicketRepository.findById(ticketId)
                 .switchIfEmpty(Mono.error(new BizException("当票不存在")))
-                .flatMap(ticket -> pawnRenewRepository.insert(PawnRenew.apply(ticket, renewedAt)));
+                .flatMap(ticket -> pawnerStatePort.findStatus(ticket.getPawnerId())
+                        .switchIfEmpty(Mono.error(new BizException("当票归属的当户档案不存在，不能续当")))
+                        .doOnNext(this::requireNotFrozen)
+                        .then(pawnRenewRepository.insert(PawnRenew.apply(ticket, renewedAt))));
+    }
+
+    /** 冻结户的票不能续，得先解冻；注销档案不再受理续当。 */
+    private void requireNotFrozen(PawnerStatus status) {
+        if (status == PawnerStatus.FROZEN) {
+            throw new BizException("该当户已冻结，名下当票不能续当；请先解冻再办理");
+        }
+        if (status == PawnerStatus.CLOSED) {
+            throw new BizException("该当户已注销，不能续当");
+        }
     }
 
     /** 查看续当单：id 或 renewNo（XD-编号）任一指定。 */

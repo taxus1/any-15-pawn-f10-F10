@@ -62,18 +62,44 @@ public class Pawner extends BaseEntity {
         applyProfile(name, idCard, phone, address);
     }
 
-    /** 在 NORMAL / FROZEN 之间切换；仅应用层在明确「冻结/解冻」语义时使用。 */
-    public void changeStatus(PawnerStatus target) {
-        if (target == null) {
-            throw new BizException("状态不能为空");
+    /**
+     * 冻结：正常（NORMAL）→ 冻结（FROZEN）。
+     *
+     * 幂等：已经是冻结状态，连着再点多少回都不报错、也不翻状态，返回 false 告诉应用层「没发生变化」
+     * （办理时刻与经办人保留头一次冻结时的记录，不被重复点击覆盖）。
+     * 已注销（CLOSED）是终态历史档案，不能冻；真有需要请走档案更正等专门流程，这里单独说明并挡回。
+     *
+     * @return 本次是否真的发生了状态翻转（true 已冻结 / false 本来就是冻结）
+     */
+    public boolean freeze() {
+        if (status == PawnerStatus.CLOSED) {
+            throw new BizException("当户已注销，不能冻结；注销是终态，如属误操作请按档案更正流程单独处理");
         }
-        if (this.status == PawnerStatus.CLOSED) {
-            throw new BizException("当户已注销，不能再变更状态");
+        if (status == PawnerStatus.FROZEN) {
+            return false;
         }
-        if (target == PawnerStatus.CLOSED) {
-            throw new BizException("注销必须走专门的注销用例");
+        this.status = PawnerStatus.FROZEN;
+        return true;
+    }
+
+    /**
+     * 解冻：冻结（FROZEN）→ 正常（NORMAL）。
+     *
+     * 幂等：本来就是正常状态，重复点不报错、不翻状态，返回 false。
+     * 已注销（CLOSED）的不能解 —— 注销与冻结是两条路子，注销档案不会挂在冻结态，
+     * 走到这里说明档案情况特殊，需单独核实处理，这里把情况说明白并挡回。
+     *
+     * @return 本次是否真的发生了状态翻转（true 已解冻 / false 本来就是正常）
+     */
+    public boolean unfreeze() {
+        if (status == PawnerStatus.CLOSED) {
+            throw new BizException("当户已注销，不能解冻；注销与冻结不是一回事，如属误注销请按档案更正流程单独处理");
         }
-        this.status = target;
+        if (status == PawnerStatus.NORMAL) {
+            return false;
+        }
+        this.status = PawnerStatus.NORMAL;
+        return true;
     }
 
     /**

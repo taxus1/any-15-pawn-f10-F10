@@ -30,6 +30,20 @@ public interface PawnerRepository {
 
     Mono<Pawner> findByPawnerNo(String pawnerNo);
 
+    /**
+     * 冻结：条件更新「NORMAL → FROZEN」。已经是 FROZEN 的重复点击不再落库（幂等，
+     * 头一次冻结的办理时刻/经办人保留）；CLOSED 终态抛业务异常说明情况。
+     * 并发冻结/解冻靠行级条件更新串行，库里最终只落一个确定状态，不会一笔盖一笔地乱翻。
+     * 返回落库后的最新聚合（幂等命中时返回的仍是冻结态）。
+     */
+    Mono<Pawner> freeze(Long id);
+
+    /**
+     * 解冻：条件更新「FROZEN → NORMAL」。已经是 NORMAL 的重复点击不再落库（幂等）；
+     * CLOSED 终态抛业务异常说明情况（注销的不能解）。并发语义同 {@link #freeze}。
+     */
+    Mono<Pawner> unfreeze(Long id);
+
     /** 按条件翻名单；条件中 status 为 null 时只出 NORMAL/FROZEN，不出 CLOSED。 */
     Mono<PageResult<Pawner>> page(int pageNum, int pageSize, PawnerQuery query);
 }
