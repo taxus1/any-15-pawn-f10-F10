@@ -2,16 +2,15 @@ package com.somepro.domain.redeem.model;
 
 import com.somepro.common.exception.BizException;
 import com.somepro.domain.shared.model.BaseEntity;
+import com.somepro.domain.shared.model.PawnSettlement;
 import com.somepro.domain.ticket.model.PawnTicket;
 import com.somepro.domain.ticket.model.TicketStatus;
 import lombok.Getter;
 import lombok.Setter;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.temporal.ChronoUnit;
 
 /**
  * 赎当结算聚合根（纯领域对象，不带任何持久化注解）。
@@ -19,7 +18,9 @@ import java.time.temporal.ChronoUnit;
  * 一条记录 = 一次赎当。核心不变量：
  * 1. 只有在当（ACTIVE）的当票才赎得了；已赎回 / 已绝当 / 已撤销都是定了案的历史票，不收；
  * 2. 晚于到期日期来赎照收，费用按实际天数算，不额外加罚；
- * 3. 计费按天走：日费率 =（票面上的月利率快照 + 月综合费率快照）÷ 30，
+ * 3. 计费按天走，日费率 / 计费天数 / 费用 / 应还总额的算法规矩统一定在
+ *    {@link PawnSettlement}（赎当办理与绝当翻单共用同一口径，绝不另立一套）：
+ *    日费率 =（票面上的月利率快照 + 月综合费率快照）÷ 30，
  *    费用 = 当金 × 日费率 × 计费天数；计费天数 = 赎当日期 − 起当日期的自然日数，不足一天按一天算；
  *    应还总额 = 当金 + 费用；金额一律保留两位小数、四舍五入；
  * 4. 利率费率一律照票面上的快照算 —— 那是开票当时抄下来的，赎回时不去读现在的费率配置，
@@ -35,9 +36,6 @@ import java.time.temporal.ChronoUnit;
 @Getter
 @Setter
 public class PawnRedeem extends BaseEntity {
-
-    /** 日费率分母：月利率、月综合费率都是「每月」口径，折成每天除以 30。 */
-    private static final BigDecimal DAYS_PER_MONTH = BigDecimal.valueOf(30);
 
     private Long id;
 
@@ -87,27 +85,17 @@ public class PawnRedeem extends BaseEntity {
             throw new BizException("赎当办理时刻缺失，不能赎当");
         }
 
-        // 计费天数：赎当日期 − 起当日期的自然日数，不足一天按一天算。
-        // 晚于到期日期来赎也照这个算，实际多少天算多少天，不额外加罚。
-        LocalDate redeemDate = redeemedAt.toLocalDate();
-        int usedDays = (int) Math.max(1L, ChronoUnit.DAYS.between(startDate, redeemDate));
-
-        // 日费率 =（月利率快照 + 月综合费率快照）÷ 30；费用 = 当金 × 日费率 × 计费天数。
-        // 一律照票面上的快照算，不读现在的费率配置；金额保留两位小数四舍五入。
-        BigDecimal dailyRate = ticket.getMonthlyRate().add(ticket.getServiceRate())
-                .divide(DAYS_PER_MONTH, 10, RoundingMode.HALF_UP);
-        BigDecimal fee = ticket.getPawnAmount()
-                .multiply(dailyRate)
-                .multiply(BigDecimal.valueOf(usedDays))
-                .setScale(2, RoundingMode.HALF_UP);
-        BigDecimal total = ticket.getPawnAmount().add(fee).setScale(2, RoundingMode.HALF_UP);
+        // 该收的本息照共享口径算（绝当翻单算欠款走的是同一个 settle），本聚合不另立算法。
+        PawnSettlement settlement = PawnSettlement.settle(
+                ticket.getPawnAmount(), ticket.getMonthlyRate(), ticket.getServiceRate(),
+                startDate, redeemedAt.toLocalDate());
 
         PawnRedeem redeem = new PawnRedeem();
         redeem.ticketId = ticket.getId();
         redeem.redeemedAt = redeemedAt;
-        redeem.usedDays = usedDays;
-        redeem.feeAmount = fee;
-        redeem.totalAmount = total;
+        redeem.usedDays = settlement.usedDays();
+        redeem.feeAmount = settlement.feeAmount();
+        redeem.totalAmount = settlement.totalAmount();
         return redeem;
     }
 }
