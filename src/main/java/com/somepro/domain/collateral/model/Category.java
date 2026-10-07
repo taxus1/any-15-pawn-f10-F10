@@ -55,4 +55,21 @@ public enum Category {
         }
         throw new BizException("类别只支持 JEWELRY / WATCH / ELECTRONICS / VEHICLE / OTHER：" + code);
     }
+
+    /**
+     * 与 {@link #ofCode(String)} 同一套合法值，但解析不到时返回 null 而不是抛异常。
+     * 用于只读投影（如台账）对库里类别码的防御性兜底，避免脏码把整页带挂。
+     */
+    public static Category ofCodeOrNull(String code) {
+        if (code == null) {
+            return null;
+        }
+        String trimmed = code.trim();
+        for (Category category : values()) {
+            if (category.code.equals(trimmed)) {
+                return category;
+            }
+        }
+        return null;
+    }
 }
